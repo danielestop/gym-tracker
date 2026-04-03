@@ -481,8 +481,67 @@ function ExerciseManager(props) {
 function WorkoutSession(props) {
   var day = props.day, data = props.data, setData = props.setData, timer = props.timer, onSave = props.onSave;
   var exercises = data.days[day] ? data.days[day].exercises : [];
-  var _s = useState({}), sets = _s[0], setSets = _s[1];
+  var DRAFT_KEY = "gym-tracker-draft-" + day;
+
+  // Load draft from localStorage on mount or day change
+  function loadDraft() {
+    try {
+      var raw = localStorage.getItem(DRAFT_KEY);
+      if (raw) {
+        var draft = JSON.parse(raw);
+        // Check if draft has any actual data
+        var hasData = false;
+        Object.keys(draft).forEach(function(k) {
+          if (draft[k] && draft[k].length > 0) {
+            draft[k].forEach(function(s) {
+              if (s.kg || s.note) hasData = true;
+            });
+          }
+        });
+        if (hasData) return draft;
+      }
+    } catch(ex) {}
+    return {};
+  }
+
+  var _s = useState(loadDraft), sets = _s[0], setSets = _s[1];
   var _preview = useState(null), preview = _preview[0], setPreview = _preview[1];
+  var _draftNotice = useState(function() {
+    try {
+      var raw = localStorage.getItem(DRAFT_KEY);
+      if (raw) {
+        var d = JSON.parse(raw);
+        var has = false;
+        Object.keys(d).forEach(function(k) {
+          if (d[k]) d[k].forEach(function(s) { if (s.kg || s.note) has = true; });
+        });
+        return has;
+      }
+    } catch(ex) {}
+    return false;
+  }), showDraftNotice = _draftNotice[0], setShowDraftNotice = _draftNotice[1];
+
+  // Auto-save draft whenever sets change
+  useEffect(function() {
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(sets)); } catch(ex) {}
+  }, [sets]);
+
+  // Reload draft when day changes
+  useEffect(function() {
+    setSets(loadDraft());
+    // Check if there's a notice to show
+    try {
+      var raw = localStorage.getItem(DRAFT_KEY);
+      if (raw) {
+        var d = JSON.parse(raw);
+        var has = false;
+        Object.keys(d).forEach(function(k) {
+          if (d[k]) d[k].forEach(function(s) { if (s.kg || s.note) has = true; });
+        });
+        setShowDraftNotice(has);
+      } else { setShowDraftNotice(false); }
+    } catch(ex) { setShowDraftNotice(false); }
+  }, [day]);
 
   var lastLog = null;
   for (var i = data.logs.length - 1; i >= 0; i--) {
@@ -518,11 +577,25 @@ function WorkoutSession(props) {
     });
   }
 
+  function clearDraft() {
+    try { localStorage.removeItem(DRAFT_KEY); } catch(ex) {}
+    setShowDraftNotice(false);
+  }
+
+  function discardDraft() {
+    if (confirm("Eliminare la bozza? I dati non salvati andranno persi.")) {
+      clearDraft();
+      setSets({});
+    }
+  }
+
   function saveWorkout() {
     var entry = { day: day, date: new Date().toISOString(), sets: JSON.parse(JSON.stringify(sets)) };
     var updated = JSON.parse(JSON.stringify(data));
     updated.logs.push(entry);
-    setData(updated); saveData(updated); setSets({});
+    setData(updated); saveData(updated);
+    setSets({});
+    clearDraft();
     if (onSave) onSave(updated);
     alert("Allenamento salvato!");
   }
@@ -536,6 +609,14 @@ function WorkoutSession(props) {
 
   return e("div", null,
     e(Timer, { timer: timer }),
+
+    // Draft notice
+    showDraftNotice ? e("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", background: "#f39c1218", border: "1px solid #f39c1244", borderRadius: 10, marginBottom: 12 } },
+      e("span", { style: { fontSize: 13, color: "#f39c12", flex: 1 } }, "\uD83D\uDCC4 Bozza recuperata"),
+      e("button", { onClick: function() { setShowDraftNotice(false); }, style: { background: "none", border: "none", color: "#666", fontSize: 12, cursor: "pointer" } }, "OK"),
+      e("button", { onClick: discardDraft, style: { background: "none", border: "none", color: "#e74c3c", fontSize: 12, cursor: "pointer" } }, "Scarta")
+    ) : null,
+
     exercises.map(function(ex) {
       var o = exObj(ex);
       var exSets = sets[o.name] || [{ kg: "", note: "" }];
