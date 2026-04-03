@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="GYM Tracker">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#09090f">
+<title>GYM Tracker</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  body {
+    font-family: 'Outfit', 'Segoe UI', sans-serif;
+    background: #09090f; color: #e0e0e0;
+    min-height: 100vh; min-height: 100dvh; overflow-x: hidden;
+  }
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type="number"] { -moz-appearance: textfield; }
+  #app { max-width: 480px; margin: 0 auto; display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh; }
+  textarea { font-family: 'JetBrains Mono', monospace; }
+  .modal-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.80); z-index: 200;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  .modal-box {
+    background: #14141e; border: 1px solid #333; border-radius: 16px;
+    padding: 24px; max-width: 360px; width: 100%; text-align: center;
+  }
+  .modal-box h3 { color: #e0e0e0; margin-bottom: 12px; font-size: 16px; }
+  .modal-box p { color: #888; font-size: 13px; margin-bottom: 20px; }
+  .modal-btns { display: flex; gap: 8px; }
+  .modal-btns button { flex: 1; padding: 12px; border: none; border-radius: 10px; font-weight: 600; font-size: 14px; cursor: pointer; font-family: inherit; }
+  .img-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.92); z-index: 300;
+    display: flex; align-items: center; justify-content: center;
+    padding: 16px; flex-direction: column;
+  }
+  .img-overlay img {
+    max-width: 100%; max-height: 75vh; border-radius: 12px;
+    object-fit: contain; background: #111;
+  }
+  .img-overlay .img-title {
+    color: #e0e0e0; font-size: 16px; font-weight: 600;
+    margin-bottom: 12px; text-align: center;
+  }
+  .img-overlay .img-close {
+    position: absolute; top: 16px; right: 16px;
+    width: 40px; height: 40px; border-radius: 50%;
+    background: rgba(255,255,255,0.15); border: none;
+    color: #fff; font-size: 22px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  }
+  .img-btn {
+    background: none; border: 1px solid #333; border-radius: 6px;
+    color: #888; font-size: 16px; cursor: pointer; padding: 2px 6px;
+    line-height: 1; transition: all 0.2s;
+  }
+  .img-btn:active { background: #00e67622; border-color: #00e676; color: #00e676; }
+  .sync-bar {
+    display: flex; align-items: center; gap: 8px; padding: 6px 16px;
+    background: #0d0d15; border-bottom: 1px solid #1a1a2e; font-size: 11px;
+  }
+  .sync-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+
+<script>
+var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef, useCallback = React.useCallback;
+var e = React.createElement;
+
+var STORAGE_KEY = "gym-tracker-data";
+var CLIENT_ID = "32657493722-9dig78q9ah1ecjk98hb8kjke5bb2ckv9.apps.googleusercontent.com";
+var SCOPES = "https://www.googleapis.com/auth/drive.file";
+var BACKUP_FILENAME = "gym-tracker-backup.json";
+
+// ── Exercise helpers ──
+function exObj(ex) {
+  if (typeof ex === "string") return { name: ex, image: "" };
+  return { name: ex.name || "", image: ex.image || "" };
+}
+
+var defaultData = {
+  days: {
+    A: { name: "Giorno A", exercises: [] },
+    B: { name: "Giorno B", exercises: [] },
+    C: { name: "Giorno C", exercises: [] },
+  },
+  logs: [],
+};
+
+function loadData() {
+  try {
+    var raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch(ex) {}
+  return JSON.parse(JSON.stringify(defaultData));
+}
+
+function saveData(data) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch(ex) {}
+}
+
+// ══════════════════════════════════════
+// Google Drive Integration
+// ══════════════════════════════════════
+var gDrive = {
+  tokenClient: null,
+  accessToken: null,
+  initialized: false,
+
+  init: function(onReady) {
+    if (gDrive.initialized) return;
+    var check = setInterval(function() {
+      if (window.google && google.accounts && google.accounts.oauth2) {
+        clearInterval(check);
+        gDrive.tokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: CLIENT_ID,
+          scope: SCOPES,
+          callback: function() {} // overridden per-call
+        });
+        gDrive.initialized = true;
+        // Check if we have a saved token
+        var saved = sessionStorage.getItem("gym_gdrive_token");
+        if (saved) {
+          gDrive.accessToken = saved;
+        }
+        if (onReady) onReady();
+      }
+    }, 200);
+  },
+
+  authorize: function(callback) {
+    if (!gDrive.tokenClient) { callback(new Error("Google non caricato")); return; }
+    gDrive.tokenClient.callback = function(resp) {
+      if (resp.error) { callback(new Error(resp.error)); return; }
+      gDrive.accessToken = resp.access_token;
+      sessionStorage.setItem("gym_gdrive_token", resp.access_token);
+      callback(null);
+    };
+    if (gDrive.accessToken) {
+      gDrive.tokenClient.requestAccessToken({ prompt: "" });
+    } else {
+      gDrive.tokenClient.requestAccessToken({ prompt: "consent" });
+    }
+  },
+
+  findFile: function(callback) {
+    fetch("https://www.googleapis.com/drive/v3/files?q=name%3D%27" + BACKUP_FILENAME + "%27+and+trashed%3Dfalse&spaces=drive&fields=files(id,name,modifiedTime)", {
+      headers: { "Authorization": "Bearer " + gDrive.accessToken }
+    })
+    .then(function(r) {
+      if (r.status === 401) { gDrive.accessToken = null; sessionStorage.removeItem("gym_gdrive_token"); callback(new Error("Token scaduto")); return; }
+      return r.json();
+    })
+    .then(function(data) {
+      if (!data) return;
+      if (data.files && data.files.length > 0) {
+        callback(null, data.files[0]);
+      } else {
+        callback(null, null);
+      }
+    })
+    .catch(function(err) { callback(err); });
+  },
+
+  uploadFile: function(content, fileId, callback) {
+    var metadata = { name: BACKUP_FILENAME, mimeType: "application/json" };
+    var boundary = "gym_tracker_boundary";
+    var body = "--" + boundary + "\r\n" +
+      "Content-Type: application/json; charset=UTF-8\r\n\r\n" +
+      JSON.stringify(metadata) + "\r\n" +
+      "--" + boundary + "\r\n" +
+      "Content-Type: application/json\r\n\r\n" +
+      JSON.stringify(content, null, 2) + "\r\n" +
+      "--" + boundary + "--";
+
+    var url = fileId
+      ? "https://www.googleapis.com/upload/drive/v3/files/" + fileId + "?uploadType=multipart"
+      : "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
+
+    fetch(url, {
+      method: fileId ? "PATCH" : "POST",
+      headers: {
+        "Authorization": "Bearer " + gDrive.accessToken,
+        "Content-Type": "multipart/related; boundary=" + boundary
+      },
+      body: body
+    })
+    .then(function(r) {
+      if (r.status === 401) { gDrive.accessToken = null; sessionStorage.removeItem("gym_gdrive_token"); callback(new Error("Token scaduto")); return; }
+      return r.json();
+    })
+    .then(function(data) {
+      if (data && data.id) callback(null, data);
+      else callback(new Error("Upload fallito"));
+    })
+    .catch(function(err) { callback(err); });
+  },
+
+  downloadFile: function(fileId, callback) {
+    fetch("https://www.googleapis.com/drive/v3/files/" + fileId + "?alt=media", {
+      headers: { "Authorization": "Bearer " + gDrive.accessToken }
+    })
+    .then(function(r) {
+      if (r.status === 401) { gDrive.accessToken = null; sessionStorage.removeItem("gym_gdrive_token"); callback(new Error("Token scaduto")); return; }
+      return r.json();
+    })
+    .then(function(data) {
+      if (data) callback(null, data);
+    })
+    .catch(function(err) { callback(err); });
+  },
+
+  // High-level: save data to Drive
+  save: function(data, callback) {
+    function doSave() {
+      gDrive.findFile(function(err, file) {
+        if (err) { callback(err); return; }
+        gDrive.uploadFile(data, file ? file.id : null, function(err2) {
+          if (err2) callback(err2);
+          else callback(null);
+        });
+      });
+    }
+    if (!gDrive.accessToken) {
+      gDrive.authorize(function(err) {
+        if (err) { callback(err); return; }
+        doSave();
+      });
+    } else {
+      doSave();
+    }
+  },
+
+  // High-level: load data from Drive
+  load: function(callback) {
+    function doLoad() {
+      gDrive.findFile(function(err, file) {
+        if (err) { callback(err); return; }
+        if (!file) { callback(null, null); return; } // No backup yet
+        gDrive.downloadFile(file.id, function(err2, data) {
+          if (err2) callback(err2);
+          else callback(null, data);
+        });
+      });
+    }
+    if (!gDrive.accessToken) {
+      gDrive.authorize(function(err) {
+        if (err) { callback(err); return; }
+        doLoad();
+      });
+    } else {
+      doLoad();
+    }
+  }
+};
+
+// ── Timer ──
+function useTimer(initialSeconds) {
+  var _to = useState(initialSeconds), total = _to[0], setTotal = _to[1];
+  var _re = useState(initialSeconds), remaining = _re[0], setRemaining = _re[1];
+  var _ru = useState(false), running = _ru[0], setRunning = _ru[1];
+  var intervalRef = useRef(null);
+  var audioCtx = useRef(null);
+
+  var beep = useCallback(function() {
+    try {
+      if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
+      var ctx = audioCtx.current;
+      var osc = ctx.createOscillator(); var gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.value = 880; gain.gain.value = 0.3;
+      osc.start(); osc.stop(ctx.currentTime + 0.25);
+      setTimeout(function() {
+        var o2 = ctx.createOscillator(); var g2 = ctx.createGain();
+        o2.connect(g2); g2.connect(ctx.destination);
+        o2.frequency.value = 1100; g2.gain.value = 0.3;
+        o2.start(); o2.stop(ctx.currentTime + 0.35);
+      }, 300);
+    } catch(ex) {}
+  }, []);
+
+  useEffect(function() {
+    if (running && remaining > 0) {
+      intervalRef.current = setInterval(function() {
+        setRemaining(function(r) {
+          if (r <= 1) { setRunning(false); beep(); return 0; }
+          return r - 1;
+        });
+      }, 1000);
+    }
+    return function() { clearInterval(intervalRef.current); };
+  }, [running, remaining, beep]);
+
+  return {
+    total: total, remaining: remaining, running: running,
+    start: function() { if (remaining > 0) setRunning(true); },
+    pause: function() { setRunning(false); },
+    reset: function() { setRunning(false); setRemaining(total); },
+    setTime: function(s) { setTotal(s); setRemaining(s); setRunning(false); }
+  };
+}
+
+// ── Styles ──
+var inputStyle = {
+  background: "#1a1a2e", border: "1px solid #333", borderRadius: 8,
+  padding: "8px 10px", color: "#e0e0e0", fontSize: 14, outline: "none", fontFamily: "inherit"
+};
+function btnStyle(bg, color) {
+  return { background: bg, color: color, border: "none", borderRadius: 8, padding: "8px 16px", fontWeight: 600, cursor: "pointer", fontSize: 14, fontFamily: "inherit" };
+}
+var chipStyle = {
+  background: "#1a1a2e", border: "1px solid #333", borderRadius: 20,
+  padding: "5px 12px", color: "#aaa", cursor: "pointer", fontSize: 13, fontFamily: "inherit"
+};
+
+// ── Image Overlay (hybrid) ──
+function ImageOverlay(props) {
+  if (!props.src) return null;
+  var _st = useState("loading"), status = _st[0], setStatus = _st[1];
+  var searchUrl = "https://www.google.com/search?tbm=isch&q=" + encodeURIComponent(props.title + " esercizio palestra");
+
+  useEffect(function() {
+    setStatus("loading");
+    var img = new Image();
+    img.onload = function() { setStatus("ok"); };
+    img.onerror = function() { setStatus("error"); };
+    img.src = props.src;
+  }, [props.src]);
+
+  var content;
+  if (status === "loading") {
+    content = e("div", { style: { color: "#888", fontSize: 14, textAlign: "center", padding: 40 } },
+      e("div", { style: { fontSize: 28, marginBottom: 12 } }, "\u23F3"),
+      "Caricamento immagine..."
+    );
+  } else if (status === "ok") {
+    content = e("img", { src: props.src, alt: props.title || "Esercizio", onClick: function(ev) { ev.stopPropagation(); } });
+  } else {
+    content = e("div", { style: { textAlign: "center", padding: 20 }, onClick: function(ev) { ev.stopPropagation(); } },
+      e("div", { style: { fontSize: 36, marginBottom: 12 } }, "\uD83D\uDDBC\uFE0F"),
+      e("p", { style: { color: "#888", fontSize: 14, marginBottom: 16 } }, "Immagine non disponibile"),
+      e("a", {
+        href: searchUrl, target: "_blank", rel: "noopener noreferrer",
+        style: { display: "inline-block", background: "#00e676", color: "#000", padding: "12px 24px", borderRadius: 10, fontWeight: 700, fontSize: 14, textDecoration: "none", fontFamily: "inherit" }
+      }, "\uD83D\uDD0D Cerca su Google Immagini")
+    );
+  }
+  return e("div", { className: "img-overlay", onClick: props.onClose },
+    e("button", { className: "img-close", onClick: props.onClose }, "\u2715"),
+    e("div", { className: "img-title" }, props.title || ""),
+    content
+  );
+}
+
+// ── Timer Component ──
+function Timer(props) {
+  var t = props.timer;
+  var pct = t.total > 0 ? t.remaining / t.total : 0;
+  var mins = String(Math.floor(t.remaining / 60)).padStart(2, "0");
+  var secs = String(t.remaining % 60).padStart(2, "0");
+  var presets = [30, 45, 60, 90, 120, 180];
+  var radius = 54; var circ = 2 * Math.PI * radius;
+  var strokeColor = t.remaining === 0 ? "#e74c3c" : t.remaining <= 5 ? "#f39c12" : "#00e676";
+  var statusText = t.remaining === 0 ? "TEMPO!" : t.running ? "IN CORSO" : "PRONTO";
+
+  return e("div", { style: { textAlign: "center", padding: "20px 0" } },
+    e("svg", { width: 160, height: 160, viewBox: "0 0 130 130", style: { display: "block", margin: "0 auto" } },
+      e("circle", { cx: 65, cy: 65, r: radius, fill: "none", stroke: "#1a1a2e", strokeWidth: 8 }),
+      e("circle", {
+        cx: 65, cy: 65, r: radius, fill: "none", stroke: strokeColor, strokeWidth: 8, strokeLinecap: "round",
+        strokeDasharray: circ, strokeDashoffset: circ * (1 - pct),
+        transform: "rotate(-90 65 65)",
+        style: { transition: "stroke-dashoffset 0.4s linear, stroke 0.3s" }
+      }),
+      e("text", { x: 65, y: 62, textAnchor: "middle", fill: "#e0e0e0", fontSize: 28, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }, mins + ":" + secs),
+      e("text", { x: 65, y: 80, textAnchor: "middle", fill: "#888", fontSize: 10 }, statusText)
+    ),
+    e("div", { style: { display: "flex", gap: 8, justifyContent: "center", marginTop: 16 } },
+      !t.running
+        ? e("button", { onClick: t.start, style: btnStyle("#00e676", "#000") }, "\u25B6 Avvia")
+        : e("button", { onClick: t.pause, style: btnStyle("#f39c12", "#000") }, "\u23F8 Pausa"),
+      e("button", { onClick: t.reset, style: btnStyle("#444", "#fff") }, "\u21BA Reset")
+    ),
+    e("div", { style: { display: "flex", gap: 6, justifyContent: "center", marginTop: 12, flexWrap: "wrap" } },
+      presets.map(function(s) {
+        var label = s < 60 ? s + "s" : (s / 60) + "m";
+        return e("button", {
+          key: s, onClick: function() { t.setTime(s); },
+          style: Object.assign({}, chipStyle, {
+            background: t.total === s ? "#00e676" : "#1a1a2e",
+            color: t.total === s ? "#000" : "#aaa",
+            fontWeight: t.total === s ? 700 : 400
+          })
+        }, label);
+      })
+    )
+  );
+}
+
+// ── Exercise Manager ──
+function ExerciseManager(props) {
+  var day = props.day, data = props.data, setData = props.setData;
+  var _s = useState(""), newExName = _s[0], setNewExName = _s[1];
+  var _si = useState(""), newExImg = _si[0], setNewExImg = _si[1];
+  var _showImg = useState(false), showImgField = _showImg[0], setShowImgField = _showImg[1];
+  var _preview = useState(null), preview = _preview[0], setPreview = _preview[1];
+  var exercises = data.days[day].exercises;
+
+  function addExercise() {
+    var name = newExName.trim();
+    if (!name) return;
+    var updated = JSON.parse(JSON.stringify(data));
+    updated.days[day].exercises.push({ name: name, image: newExImg.trim() });
+    setData(updated); saveData(updated);
+    setNewExName(""); setNewExImg(""); setShowImgField(false);
+  }
+  function removeExercise(idx) {
+    var updated = JSON.parse(JSON.stringify(data));
+    updated.days[day].exercises.splice(idx, 1);
+    setData(updated); saveData(updated);
+  }
+  function renameDay(newName) {
+    var updated = JSON.parse(JSON.stringify(data));
+    updated.days[day].name = newName;
+    setData(updated); saveData(updated);
+  }
+
+  return e("div", { style: { marginBottom: 24 } },
+    e("input", {
+      value: data.days[day].name, onChange: function(ev) { renameDay(ev.target.value); },
+      style: Object.assign({}, inputStyle, { fontWeight: 700, fontSize: 16, marginBottom: 8, color: "#00e676", background: "transparent", border: "none", borderBottom: "1px solid #333", borderRadius: 0, padding: "4px 0", width: "100%" })
+    }),
+    exercises.map(function(ex, i) {
+      var o = exObj(ex);
+      return e("div", { key: i, style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid #1a1a2e" } },
+        e("button", { className: "img-btn", onClick: (function(oo) { return function() {
+          if (oo.image) { setPreview({ src: oo.image, title: oo.name }); }
+          else { window.open("https://www.google.com/search?tbm=isch&q=" + encodeURIComponent(oo.name + " esercizio palestra"), "_blank"); }
+        }; })(o) }, "\uD83D\uDCF7"),
+        e("span", { style: { flex: 1, color: "#ccc", fontSize: 14 } }, o.name),
+        e("button", { onClick: function() { removeExercise(i); }, style: { background: "none", border: "none", color: "#e74c3c", cursor: "pointer", fontSize: 16, padding: 4 } }, "\u2715")
+      );
+    }),
+    e("div", { style: { display: "flex", gap: 8, marginTop: 8 } },
+      e("input", {
+        placeholder: "Nuovo esercizio...", value: newExName,
+        onChange: function(ev) { setNewExName(ev.target.value); },
+        onKeyDown: function(ev) { if (ev.key === "Enter") addExercise(); },
+        style: Object.assign({}, inputStyle, { flex: 1 })
+      }),
+      e("button", { onClick: function() { setShowImgField(!showImgField); }, style: Object.assign({}, chipStyle, { fontSize: 14, padding: "6px 10px", color: showImgField ? "#00e676" : "#666", border: showImgField ? "1px solid #00e676" : "1px solid #333" }) }, "\uD83D\uDCF7"),
+      e("button", { onClick: addExercise, style: btnStyle("#00e676", "#000") }, "+")
+    ),
+    showImgField ? e("input", {
+      placeholder: "URL immagine (opzionale)", value: newExImg,
+      onChange: function(ev) { setNewExImg(ev.target.value); },
+      style: Object.assign({}, inputStyle, { width: "100%", marginTop: 6, fontSize: 12 })
+    }) : null,
+    preview ? e(ImageOverlay, { src: preview.src, title: preview.title, onClose: function() { setPreview(null); } }) : null
+  );
+}
+
+// ── Workout Session ──
+function WorkoutSession(props) {
+  var day = props.day, data = props.data, setData = props.setData, timer = props.timer, onSave = props.onSave;
+  var exercises = data.days[day] ? data.days[day].exercises : [];
+  var _s = useState({}), sets = _s[0], setSets = _s[1];
+  var _preview = useState(null), preview = _preview[0], setPreview = _preview[1];
+
+  var lastLog = null;
+  for (var i = data.logs.length - 1; i >= 0; i--) {
+    if (data.logs[i].day === day) { lastLog = data.logs[i]; break; }
+  }
+
+  function getLastSets(exNameStr) {
+    if (!lastLog || !lastLog.sets[exNameStr]) return null;
+    return lastLog.sets[exNameStr];
+  }
+
+  function updateSet(exNameStr, idx, field, value) {
+    setSets(function(prev) {
+      var exSets = (prev[exNameStr] || [{ kg: "", note: "" }]).slice();
+      exSets[idx] = Object.assign({}, exSets[idx]);
+      exSets[idx][field] = value;
+      var n = Object.assign({}, prev); n[exNameStr] = exSets; return n;
+    });
+  }
+
+  function addSet(exNameStr) {
+    setSets(function(prev) {
+      var exSets = (prev[exNameStr] || []).slice();
+      exSets.push({ kg: "", note: "" });
+      var n = Object.assign({}, prev); n[exNameStr] = exSets; return n;
+    });
+  }
+
+  function removeSet(exNameStr, idx) {
+    setSets(function(prev) {
+      var exSets = (prev[exNameStr] || []).filter(function(_, i) { return i !== idx; });
+      var n = Object.assign({}, prev); n[exNameStr] = exSets; return n;
+    });
+  }
+
+  function saveWorkout() {
+    var entry = { day: day, date: new Date().toISOString(), sets: JSON.parse(JSON.stringify(sets)) };
+    var updated = JSON.parse(JSON.stringify(data));
+    updated.logs.push(entry);
+    setData(updated); saveData(updated); setSets({});
+    if (onSave) onSave(updated);
+    alert("Allenamento salvato!");
+  }
+
+  if (exercises.length === 0) {
+    return e("div", { style: { textAlign: "center", padding: 40, color: "#666" } },
+      e("p", { style: { fontSize: 18 } }, "Nessun esercizio configurato"),
+      e("p", { style: { fontSize: 13 } }, 'Vai su "Scheda" per aggiungere gli esercizi')
+    );
+  }
+
+  return e("div", null,
+    e(Timer, { timer: timer }),
+    exercises.map(function(ex) {
+      var o = exObj(ex);
+      var exSets = sets[o.name] || [{ kg: "", note: "" }];
+      var lastSets = getLastSets(o.name);
+
+      return e("div", { key: o.name, style: { marginBottom: 20, background: "#111119", borderRadius: 12, padding: 14, border: "1px solid #222" } },
+        e("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 } },
+          e("div", { style: { fontWeight: 700, color: "#e0e0e0", fontSize: 15, flex: 1 } }, o.name),
+          e("button", { className: "img-btn", onClick: (function(oo) { return function() {
+            if (oo.image) { setPreview({ src: oo.image, title: oo.name }); }
+            else { window.open("https://www.google.com/search?tbm=isch&q=" + encodeURIComponent(oo.name + " esercizio palestra"), "_blank"); }
+          }; })(o) }, "\uD83D\uDCF7")
+        ),
+        lastSets ? e("div", { style: { fontSize: 11, color: "#888", marginBottom: 8, padding: "4px 8px", background: "#0a0a14", borderRadius: 6 } },
+          "Ultimo: " + lastSets.map(function(s, i) { return "S" + (i+1) + ": " + (s.kg || "-") + "kg"; }).join(" \u00B7 ")
+        ) : null,
+        exSets.map(function(s, i) {
+          var arrow = null;
+          if (lastSets && lastSets[i] && s.kg) {
+            var diff = Number(s.kg) - Number(lastSets[i].kg);
+            arrow = e("span", { style: { fontSize: 13, color: diff > 0 ? "#00e676" : diff < 0 ? "#e74c3c" : "#666", minWidth: 32, textAlign: "center" } },
+              diff > 0 ? "\u25B2" : diff < 0 ? "\u25BC" : "="
+            );
+          }
+          return e("div", { key: i, style: { display: "flex", gap: 6, alignItems: "center", marginBottom: 6 } },
+            e("span", { style: { color: "#555", fontSize: 12, width: 24, textAlign: "center" } }, "S" + (i+1)),
+            e("input", {
+              type: "number", inputMode: "decimal", placeholder: "kg", value: s.kg,
+              onChange: function(ev) { updateSet(o.name, i, "kg", ev.target.value); },
+              style: Object.assign({}, inputStyle, { width: 70, textAlign: "center" })
+            }),
+            arrow,
+            e("input", {
+              placeholder: "note", value: s.note,
+              onChange: function(ev) { updateSet(o.name, i, "note", ev.target.value); },
+              style: Object.assign({}, inputStyle, { flex: 1, fontSize: 12 })
+            }),
+            e("button", { onClick: function() { removeSet(o.name, i); }, style: { background: "none", border: "none", color: "#555", cursor: "pointer", padding: 2, fontSize: 14 } }, "\u2715")
+          );
+        }),
+        e("button", { onClick: function() { addSet(o.name); }, style: Object.assign({}, chipStyle, { marginTop: 4, fontSize: 12, color: "#00e676", border: "1px solid rgba(0,230,118,0.27)" }) }, "+ Serie")
+      );
+    }),
+    e("button", { onClick: saveWorkout, style: Object.assign({}, btnStyle("#00e676", "#000"), { width: "100%", padding: 14, fontSize: 16, marginTop: 12, fontWeight: 700 }) }, "\uD83D\uDCBE Salva Allenamento"),
+    preview ? e(ImageOverlay, { src: preview.src, title: preview.title, onClose: function() { setPreview(null); } }) : null
+  );
+}
+
+// ── History ──
+function History(props) {
+  var data = props.data, setData = props.setData, onSave = props.onSave;
+  var logs = data.logs.slice().reverse();
+
+  function deleteLog(idx) {
+    var realIdx = data.logs.length - 1 - idx;
+    if (!confirm("Eliminare questo allenamento?")) return;
+    var updated = JSON.parse(JSON.stringify(data));
+    updated.logs.splice(realIdx, 1);
+    setData(updated); saveData(updated);
+    if (onSave) onSave(updated);
+  }
+
+  if (logs.length === 0) {
+    return e("div", { style: { textAlign: "center", padding: 40, color: "#666" } },
+      e("p", { style: { fontSize: 18 } }, "Nessun allenamento registrato"),
+      e("p", { style: { fontSize: 13 } }, "Completa la tua prima sessione!")
+    );
+  }
+
+  return e("div", null,
+    logs.map(function(log, idx) {
+      var d = new Date(log.date);
+      var dayName = data.days[log.day] ? data.days[log.day].name : log.day;
+      return e("div", { key: idx, style: { marginBottom: 14, background: "#111119", borderRadius: 12, padding: 14, border: "1px solid #222" } },
+        e("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 } },
+          e("div", null,
+            e("span", { style: { color: "#00e676", fontWeight: 700, fontSize: 14 } }, dayName),
+            e("span", { style: { color: "#555", fontSize: 12, marginLeft: 8 } },
+              d.toLocaleDateString("it-IT", { day: "2-digit", month: "short", year: "numeric" }) + " \u00B7 " + d.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })
+            )
+          ),
+          e("button", { onClick: function() { deleteLog(idx); }, style: { background: "none", border: "none", color: "#e74c3c", cursor: "pointer", fontSize: 12, padding: 4 } }, "Elimina")
+        ),
+        Object.keys(log.sets).map(function(exNameStr) {
+          var exSets = log.sets[exNameStr];
+          return e("div", { key: exNameStr, style: { marginBottom: 6 } },
+            e("span", { style: { color: "#aaa", fontSize: 13 } }, exNameStr + ": "),
+            e("span", { style: { color: "#ddd", fontSize: 13 } },
+              exSets.map(function(s) { return (s.kg || "-") + "kg" + (s.note ? " (" + s.note + ")" : ""); }).join(" \u00B7 ")
+            )
+          );
+        })
+      );
+    })
+  );
+}
+
+// ── Template Import/Export ──
+function TemplateManager(props) {
+  var data = props.data, setData = props.setData, onSave = props.onSave;
+  var _t = useState(""), jsonText = _t[0], setJsonText = _t[1];
+  var _m = useState(null), modal = _m[0], setModal = _m[1];
+  var _msg = useState(null), msg = _msg[0], setMsg = _msg[1];
+  var _copied = useState(false), copied = _copied[0], setCopied = _copied[1];
+
+  function normalizeExercises(exercises) {
+    return exercises.map(function(ex) {
+      if (typeof ex === "string") return { name: ex, image: "" };
+      return { name: ex.name || "", image: ex.image || "" };
+    });
+  }
+
+  function handleImport() {
+    setMsg(null);
+    var text = jsonText.trim();
+    if (!text) { setMsg({ type: "err", text: "Incolla il JSON della scheda qui sopra" }); return; }
+    try {
+      var parsed = JSON.parse(text);
+      if (!parsed.days || typeof parsed.days !== "object") {
+        setMsg({ type: "err", text: 'JSON non valido: manca la chiave "days"' }); return;
+      }
+      var keys = Object.keys(parsed.days);
+      for (var i = 0; i < keys.length; i++) {
+        var d = parsed.days[keys[i]];
+        if (!d.name || !Array.isArray(d.exercises)) {
+          setMsg({ type: "err", text: "Formato errato per il giorno " + keys[i] }); return;
+        }
+        parsed.days[keys[i]].exercises = normalizeExercises(d.exercises);
+      }
+      var hasExisting = false;
+      ["A","B","C"].forEach(function(k) {
+        if (data.days[k] && data.days[k].exercises.length > 0) hasExisting = true;
+      });
+      if (hasExisting) { setModal({ parsed: parsed }); }
+      else { applyTemplate(parsed, "replace"); }
+    } catch(ex) {
+      setMsg({ type: "err", text: "JSON non valido. Controlla il formato." });
+    }
+  }
+
+  function applyTemplate(parsed, mode) {
+    var updated = JSON.parse(JSON.stringify(data));
+    ["A","B","C"].forEach(function(k) {
+      if (parsed.days[k]) {
+        if (mode === "replace") {
+          updated.days[k].name = parsed.days[k].name;
+          updated.days[k].exercises = parsed.days[k].exercises.slice();
+        } else {
+          updated.days[k].name = parsed.days[k].name || updated.days[k].name;
+          updated.days[k].exercises = updated.days[k].exercises.concat(parsed.days[k].exercises);
+        }
+      }
+    });
+    // Import logs if present
+    if (parsed.logs && Array.isArray(parsed.logs)) {
+      updated.logs = parsed.logs;
+    }
+    setData(updated); saveData(updated);
+    if (onSave) onSave(updated);
+    setJsonText(""); setModal(null);
+    setMsg({ type: "ok", text: mode === "replace" ? "Scheda sostituita!" : "Esercizi aggiunti!" });
+    setTimeout(function() { setMsg(null); }, 3000);
+  }
+
+  function copyToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function() {
+        setCopied(true); setTimeout(function() { setCopied(false); }, 2500);
+      });
+    } else {
+      var ta = document.createElement("textarea");
+      ta.value = text; document.body.appendChild(ta);
+      ta.select(); document.execCommand("copy");
+      document.body.removeChild(ta);
+      setCopied(true); setTimeout(function() { setCopied(false); }, 2500);
+    }
+  }
+
+  return e("div", null,
+    e("h2", { style: { fontSize: 16, color: "#888", fontWeight: 400, marginBottom: 4 } }, "Importa Scheda"),
+    e("p", { style: { fontSize: 12, color: "#555", marginBottom: 12 } }, "Incolla il JSON che ti fornisce Claude e premi Importa"),
+    e("textarea", {
+      value: jsonText, onChange: function(ev) { setJsonText(ev.target.value); },
+      placeholder: "Incolla qui il JSON della scheda...", rows: 8,
+      style: { width: "100%", background: "#0a0a14", border: "1px solid #333", borderRadius: 10, padding: 12, color: "#ccc", fontSize: 12, outline: "none", resize: "vertical", marginBottom: 8 }
+    }),
+    msg ? e("div", { style: { padding: "8px 12px", borderRadius: 8, marginBottom: 8, fontSize: 13, background: msg.type === "ok" ? "#00e67622" : "#e74c3c22", color: msg.type === "ok" ? "#00e676" : "#e74c3c" } }, msg.text) : null,
+    e("button", { onClick: handleImport, style: Object.assign({}, btnStyle("#00e676", "#000"), { width: "100%", padding: 12, fontSize: 15, marginBottom: 8 }) }, "\uD83D\uDCE5 Importa Scheda"),
+    e("details", { style: { marginBottom: 24, background: "#111119", borderRadius: 10, border: "1px solid #222" } },
+      e("summary", { style: { padding: "10px 14px", color: "#888", fontSize: 13, cursor: "pointer" } }, "\uD83D\uDCA1 Formato JSON di esempio"),
+      e("pre", { style: { padding: "8px 14px 14px", color: "#666", fontSize: 11, overflowX: "auto", whiteSpace: "pre-wrap" } },
+        '{\n  "days": {\n    "A": {\n      "name": "Push",\n      "exercises": [\n        { "name": "Panca piana", "image": "https://..." },\n        "French press"\n      ]\n    },\n    "B": { "name": "Pull", "exercises": [...] },\n    "C": { "name": "Legs", "exercises": [...] }\n  }\n}'
+      )
+    ),
+    e("div", { style: { height: 1, background: "#222", margin: "8px 0 20px" } }),
+    e("h2", { style: { fontSize: 16, color: "#888", fontWeight: 400, marginBottom: 12 } }, "Esporta"),
+    e("div", { style: { display: "flex", gap: 8 } },
+      e("button", { onClick: function() { copyToClipboard(JSON.stringify({ days: data.days }, null, 2)); }, style: Object.assign({}, btnStyle("#1a1a2e", "#ccc"), { flex: 1, padding: 12, border: "1px solid #333" }) }, "\uD83D\uDCCB Solo Scheda"),
+      e("button", { onClick: function() { copyToClipboard(JSON.stringify({ days: data.days, logs: data.logs }, null, 2)); }, style: Object.assign({}, btnStyle("#1a1a2e", "#ccc"), { flex: 1, padding: 12, border: "1px solid #333" }) }, "\uD83D\uDCBE Tutto (+ Storico)")
+    ),
+    copied ? e("div", { style: { textAlign: "center", marginTop: 8, color: "#00e676", fontSize: 13 } }, "\u2713 Copiato negli appunti!") : null,
+    modal ? e("div", { className: "modal-overlay", onClick: function() { setModal(null); } },
+      e("div", { className: "modal-box", onClick: function(ev) { ev.stopPropagation(); } },
+        e("h3", null, "Esercizi gi\u00E0 presenti"),
+        e("p", null, "Hai gi\u00E0 degli esercizi configurati. Vuoi sostituire tutto o aggiungere i nuovi?"),
+        e("div", { className: "modal-btns" },
+          e("button", { onClick: function() { applyTemplate(modal.parsed, "replace"); }, style: { background: "#e74c3c", color: "#fff" } }, "Sostituisci"),
+          e("button", { onClick: function() { applyTemplate(modal.parsed, "append"); }, style: { background: "#00e676", color: "#000" } }, "Aggiungi"),
+          e("button", { onClick: function() { setModal(null); }, style: { background: "#333", color: "#aaa" } }, "Annulla")
+        )
+      )
+    ) : null
+  );
+}
+
+// ══════════════════════════════════════
+// Main App
+// ══════════════════════════════════════
+var TABS = [
+  { id: "workout", label: "Allena", icon: "\uD83C\uDFCB\uFE0F" },
+  { id: "schedule", label: "Scheda", icon: "\uD83D\uDCCB" },
+  { id: "template", label: "Template", icon: "\uD83D\uDD04" },
+  { id: "history", label: "Storico", icon: "\uD83D\uDCCA" },
+];
+
+function GymTracker() {
+  var _d = useState(loadData), data = _d[0], setData = _d[1];
+  var _t = useState("workout"), tab = _t[0], setTab = _t[1];
+  var _a = useState("A"), activeDay = _a[0], setActiveDay = _a[1];
+  var timer = useTimer(60);
+
+  // Google Drive sync state
+  // "disconnected" | "syncing" | "synced" | "error"
+  var _sync = useState("disconnected"), syncStatus = _sync[0], setSyncStatus = _sync[1];
+  var _syncMsg = useState(""), syncMsg = _syncMsg[0], setSyncMsg = _syncMsg[1];
+  var driveFileId = useRef(null);
+
+  // Init Google on mount
+  useEffect(function() {
+    gDrive.init(function() {
+      // If we have a saved token, try to verify it
+      if (gDrive.accessToken) {
+        setSyncStatus("syncing"); setSyncMsg("Verifica connessione...");
+        gDrive.findFile(function(err, file) {
+          if (err) {
+            setSyncStatus("disconnected"); setSyncMsg("");
+          } else {
+            if (file) driveFileId.current = file.id;
+            setSyncStatus("synced"); setSyncMsg("Connesso a Google Drive");
+            setTimeout(function() { setSyncMsg(""); }, 2000);
+          }
+        });
+      }
+    });
+  }, []);
+
+  // Auto-save to Drive
+  function syncToDrive(updatedData) {
+    if (!gDrive.initialized) return;
+    setSyncStatus("syncing"); setSyncMsg("Salvataggio su Drive...");
+    gDrive.save(updatedData, function(err) {
+      if (err) {
+        setSyncStatus("error"); setSyncMsg("Errore sync: " + err.message);
+        setTimeout(function() { setSyncMsg(""); setSyncStatus(gDrive.accessToken ? "synced" : "disconnected"); }, 4000);
+      } else {
+        setSyncStatus("synced"); setSyncMsg("Salvato su Drive \u2713");
+        setTimeout(function() { setSyncMsg(""); }, 2000);
+      }
+    });
+  }
+
+  // Connect / Restore from Drive
+  function handleConnect() {
+    setSyncStatus("syncing"); setSyncMsg("Connessione a Google...");
+    gDrive.authorize(function(err) {
+      if (err) {
+        setSyncStatus("error"); setSyncMsg("Errore: " + err.message);
+        setTimeout(function() { setSyncMsg(""); setSyncStatus("disconnected"); }, 4000);
+        return;
+      }
+      // Check if backup exists
+      setSyncMsg("Cerco backup...");
+      gDrive.findFile(function(err2, file) {
+        if (err2) {
+          setSyncStatus("error"); setSyncMsg("Errore: " + err2.message);
+          setTimeout(function() { setSyncMsg(""); setSyncStatus("disconnected"); }, 4000);
+          return;
+        }
+        if (file) {
+          driveFileId.current = file.id;
+          // Ask if restore
+          var hasLocal = data.logs.length > 0 || data.days.A.exercises.length > 0 || data.days.B.exercises.length > 0 || data.days.C.exercises.length > 0;
+          if (hasLocal) {
+            if (confirm("Trovato un backup su Drive.\n\nVuoi ripristinare i dati dal backup?\n\nOK = Ripristina dal backup\nAnnulla = Mantieni dati locali e aggiorna il backup")) {
+              // Restore
+              setSyncMsg("Ripristino dati...");
+              gDrive.downloadFile(file.id, function(err3, cloudData) {
+                if (err3) {
+                  setSyncStatus("error"); setSyncMsg("Errore ripristino");
+                  setTimeout(function() { setSyncMsg(""); }, 3000);
+                  return;
+                }
+                setData(cloudData); saveData(cloudData);
+                setSyncStatus("synced"); setSyncMsg("Dati ripristinati \u2713");
+                setTimeout(function() { setSyncMsg(""); }, 2000);
+              });
+            } else {
+              // Keep local, overwrite cloud
+              syncToDrive(data);
+            }
+          } else {
+            // No local data, just restore
+            setSyncMsg("Ripristino dati...");
+            gDrive.downloadFile(file.id, function(err3, cloudData) {
+              if (err3) {
+                setSyncStatus("error"); setSyncMsg("Errore ripristino");
+                setTimeout(function() { setSyncMsg(""); }, 3000);
+                return;
+              }
+              setData(cloudData); saveData(cloudData);
+              setSyncStatus("synced"); setSyncMsg("Dati ripristinati \u2713");
+              setTimeout(function() { setSyncMsg(""); }, 2000);
+            });
+          }
+        } else {
+          // No backup, save current data
+          setSyncMsg("Primo backup...");
+          syncToDrive(data);
+        }
+      });
+    });
+  }
+
+  var content = null;
+  if (tab === "workout") content = e(WorkoutSession, { day: activeDay, data: data, setData: setData, timer: timer, onSave: syncToDrive });
+  if (tab === "schedule") content = e("div", null,
+    e("h2", { style: { fontSize: 16, color: "#888", fontWeight: 400, marginBottom: 16 } }, "Configura i tuoi esercizi"),
+    e(ExerciseManager, { day: activeDay, data: data, setData: setData })
+  );
+  if (tab === "template") content = e(TemplateManager, { data: data, setData: setData, onSave: syncToDrive });
+  if (tab === "history") content = e(History, { data: data, setData: setData, onSave: syncToDrive });
+
+  var showDaySelector = (tab === "workout" || tab === "schedule");
+
+  // Sync bar colors
+  var dotColor = syncStatus === "synced" ? "#00e676" : syncStatus === "syncing" ? "#f39c12" : syncStatus === "error" ? "#e74c3c" : "#555";
+  var dotAnim = syncStatus === "syncing" ? { animation: "pulse 1s infinite" } : {};
+
+  return e("div", null,
+    // Header
+    e("div", { style: { padding: "16px 16px 8px", borderBottom: "1px solid #1a1a2e" } },
+      e("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
+        e("h1", { style: { margin: 0, fontSize: 22, fontWeight: 700, letterSpacing: -0.5 } },
+          e("span", { style: { color: "#00e676" } }, "GYM"), " Tracker"
+        ),
+        syncStatus === "disconnected"
+          ? e("button", { onClick: handleConnect, style: Object.assign({}, chipStyle, { fontSize: 11, padding: "4px 10px", color: "#888" }) }, "\uD83D\uDD12 Connetti Drive")
+          : e("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
+              e("div", { className: "sync-dot", style: Object.assign({ background: dotColor }, dotAnim) }),
+              e("span", { style: { fontSize: 10, color: "#666" } },
+                syncMsg || (syncStatus === "synced" ? "Drive \u2713" : syncStatus === "error" ? "Errore" : "...")
+              )
+            )
+      )
+    ),
+
+    // Day selector
+    showDaySelector ? e("div", { style: { display: "flex", gap: 8, padding: "12px 16px" } },
+      ["A", "B", "C"].map(function(d) {
+        return e("button", {
+          key: d, onClick: function() { setActiveDay(d); },
+          style: {
+            flex: 1, padding: "10px 0", borderRadius: 10,
+            border: activeDay === d ? "2px solid #00e676" : "1px solid #222",
+            background: activeDay === d ? "rgba(0,230,118,0.07)" : "#111119",
+            color: activeDay === d ? "#00e676" : "#666",
+            fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit",
+            transition: "all 0.2s"
+          }
+        }, data.days[d].name);
+      })
+    ) : null,
+
+    // Content
+    e("div", { style: { flex: 1, padding: "0 16px 100px", overflowY: "auto", paddingTop: showDaySelector ? 0 : 16 } }, content),
+
+    // Bottom Nav
+    e("div", {
+      style: {
+        position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)",
+        width: "100%", maxWidth: 480, display: "flex",
+        background: "#0d0d15", borderTop: "1px solid #1a1a2e",
+        padding: "6px 0 env(safe-area-inset-bottom, 8px)", zIndex: 100
+      }
+    },
+      TABS.map(function(t) {
+        return e("button", {
+          key: t.id, onClick: function() { setTab(t.id); },
+          style: {
+            flex: 1, background: "none", border: "none", padding: "10px 0 6px",
+            cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+            color: tab === t.id ? "#00e676" : "#555", transition: "color 0.2s", fontFamily: "inherit"
+          }
+        },
+          e("span", { style: { fontSize: 18 } }, t.icon),
+          e("span", { style: { fontSize: 9, fontWeight: tab === t.id ? 700 : 400 } }, t.label)
+        );
+      })
+    )
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("app")).render(e(GymTracker));
+</script>
+</body>
+</html>
