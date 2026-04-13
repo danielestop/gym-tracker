@@ -276,8 +276,11 @@ function useTimer(initialSeconds) {
   var _to = useState(initialSeconds), total = _to[0], setTotal = _to[1];
   var _re = useState(initialSeconds), remaining = _re[0], setRemaining = _re[1];
   var _ru = useState(false), running = _ru[0], setRunning = _ru[1];
+  // endTimeRef stores the absolute timestamp when the timer should end
+  var endTimeRef = useRef(null);
   var intervalRef = useRef(null);
   var audioCtx = useRef(null);
+  var beepedRef = useRef(false);
 
   var beep = useCallback(function() {
     try {
@@ -296,24 +299,68 @@ function useTimer(initialSeconds) {
     } catch(ex) {}
   }, []);
 
+  // Recalculate remaining based on real elapsed time
+  function tick() {
+    if (!endTimeRef.current) return;
+    var ms = endTimeRef.current - Date.now();
+    var s = Math.max(0, Math.ceil(ms / 1000));
+    setRemaining(s);
+    if (s <= 0) {
+      if (!beepedRef.current) {
+        beepedRef.current = true;
+        beep();
+      }
+      setRunning(false);
+      endTimeRef.current = null;
+      clearInterval(intervalRef.current);
+    }
+  }
+
   useEffect(function() {
-    if (running && remaining > 0) {
-      intervalRef.current = setInterval(function() {
-        setRemaining(function(r) {
-          if (r <= 1) { setRunning(false); beep(); return 0; }
-          return r - 1;
-        });
-      }, 1000);
+    if (running) {
+      intervalRef.current = setInterval(tick, 250);
+      // Also recalculate immediately on visibility change (when phone wakes)
+      var onVisibility = function() {
+        if (document.visibilityState === "visible") tick();
+      };
+      document.addEventListener("visibilitychange", onVisibility);
+      return function() {
+        clearInterval(intervalRef.current);
+        document.removeEventListener("visibilitychange", onVisibility);
+      };
     }
     return function() { clearInterval(intervalRef.current); };
-  }, [running, remaining, beep]);
+  }, [running]);
 
   return {
     total: total, remaining: remaining, running: running,
-    start: function() { if (remaining > 0) setRunning(true); },
-    pause: function() { setRunning(false); },
-    reset: function() { setRunning(false); setRemaining(total); },
-    setTime: function(s) { setTotal(s); setRemaining(s); setRunning(false); }
+    start: function() {
+      if (remaining > 0) {
+        endTimeRef.current = Date.now() + remaining * 1000;
+        beepedRef.current = false;
+        setRunning(true);
+      }
+    },
+    pause: function() {
+      setRunning(false);
+      // Capture remaining at pause time
+      if (endTimeRef.current) {
+        var ms = endTimeRef.current - Date.now();
+        setRemaining(Math.max(0, Math.ceil(ms / 1000)));
+      }
+      endTimeRef.current = null;
+    },
+    reset: function() {
+      setRunning(false);
+      endTimeRef.current = null;
+      beepedRef.current = false;
+      setRemaining(total);
+    },
+    setTime: function(s) {
+      setTotal(s); setRemaining(s); setRunning(false);
+      endTimeRef.current = null;
+      beepedRef.current = false;
+    }
   };
 }
 
@@ -555,7 +602,7 @@ function WorkoutSession(props) {
 
   function updateSet(exNameStr, idx, field, value) {
     setSets(function(prev) {
-      var exSets = (prev[exNameStr] || [{ kg: "", note: "" }]).slice();
+      var exSets = (prev[exNameStr] || [{ kg: "", reps: "", note: "" }]).slice();
       exSets[idx] = Object.assign({}, exSets[idx]);
       exSets[idx][field] = value;
       var n = Object.assign({}, prev); n[exNameStr] = exSets; return n;
@@ -565,7 +612,7 @@ function WorkoutSession(props) {
   function addSet(exNameStr) {
     setSets(function(prev) {
       var exSets = (prev[exNameStr] || []).slice();
-      exSets.push({ kg: "", note: "" });
+      exSets.push({ kg: "", reps: "", note: "" });
       var n = Object.assign({}, prev); n[exNameStr] = exSets; return n;
     });
   }
@@ -619,7 +666,7 @@ function WorkoutSession(props) {
 
     exercises.map(function(ex) {
       var o = exObj(ex);
-      var exSets = sets[o.name] || [{ kg: "", note: "" }];
+      var exSets = sets[o.name] || [{ kg: "", reps: "", note: "" }];
       var lastSets = getLastSets(o.name);
 
       return e("div", { key: o.name, style: { marginBottom: 20, background: "#111119", borderRadius: 12, padding: 14, border: "1px solid #222" } },
@@ -631,7 +678,7 @@ function WorkoutSession(props) {
           }; })(o) }, "\uD83D\uDCF7")
         ),
         lastSets ? e("div", { style: { fontSize: 11, color: "#888", marginBottom: 8, padding: "4px 8px", background: "#0a0a14", borderRadius: 6 } },
-          "Ultimo: " + lastSets.map(function(s, i) { return "S" + (i+1) + ": " + (s.kg || "-") + "kg"; }).join(" \u00B7 ")
+          "Ultimo: " + lastSets.map(function(s, i) { return "S" + (i+1) + ": " + (s.kg || "-") + "kg" + (s.reps ? "\u00D7" + s.reps : ""); }).join(" \u00B7 ")
         ) : null,
         exSets.map(function(s, i) {
           var arrow = null;
@@ -646,13 +693,19 @@ function WorkoutSession(props) {
             e("input", {
               type: "number", inputMode: "decimal", placeholder: "kg", value: s.kg,
               onChange: function(ev) { updateSet(o.name, i, "kg", ev.target.value); },
-              style: Object.assign({}, inputStyle, { width: 70, textAlign: "center" })
+              style: Object.assign({}, inputStyle, { width: 60, textAlign: "center" })
+            }),
+            e("span", { style: { color: "#444", fontSize: 11 } }, "\u00D7"),
+            e("input", {
+              type: "number", inputMode: "numeric", placeholder: "rip", value: s.reps,
+              onChange: function(ev) { updateSet(o.name, i, "reps", ev.target.value); },
+              style: Object.assign({}, inputStyle, { width: 50, textAlign: "center" })
             }),
             arrow,
             e("input", {
               placeholder: "note", value: s.note,
               onChange: function(ev) { updateSet(o.name, i, "note", ev.target.value); },
-              style: Object.assign({}, inputStyle, { flex: 1, fontSize: 12 })
+              style: Object.assign({}, inputStyle, { flex: 1, fontSize: 12, minWidth: 0 })
             }),
             e("button", { onClick: function() { removeSet(o.name, i); }, style: { background: "none", border: "none", color: "#555", cursor: "pointer", padding: 2, fontSize: 14 } }, "\u2715")
           );
@@ -705,7 +758,7 @@ function History(props) {
           return e("div", { key: exNameStr, style: { marginBottom: 6 } },
             e("span", { style: { color: "#aaa", fontSize: 13 } }, exNameStr + ": "),
             e("span", { style: { color: "#ddd", fontSize: 13 } },
-              exSets.map(function(s) { return (s.kg || "-") + "kg" + (s.note ? " (" + s.note + ")" : ""); }).join(" \u00B7 ")
+              exSets.map(function(s) { return (s.kg || "-") + "kg" + (s.reps ? "\u00D7" + s.reps : "") + (s.note ? " (" + s.note + ")" : ""); }).join(" \u00B7 ")
             )
           );
         })
